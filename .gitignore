@@ -1,3 +1,4 @@
+run_*.sh
 id_rsa*
 data/model/
 data/glove/

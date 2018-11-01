@@ -1,14 +1,26 @@
-FROM ubuntu:16.04
+FROM nvidia/cuda:9.0-base-ubuntu16.04
 MAINTAINER GOVTECH <chong_hon_fah@tech.gov.sg>
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
+        cuda-command-line-tools-9-0 \
+        cuda-cublas-dev-9-0 \
+        cuda-cudart-dev-9-0 \
+        cuda-cufft-dev-9-0 \
+        cuda-curand-dev-9-0 \
+        cuda-cusolver-dev-9-0 \
+        cuda-cusparse-dev-9-0 \
         curl \
         gcc \
         git \
+        libcudnn7=7.3.0.29-1+cuda9.0 \
+        libcudnn7-dev=7.3.0.29-1+cuda9.0 \
+        libnccl2=2.2.13-1+cuda9.0 \
+        libnccl-dev=2.2.13-1+cuda9.0 \
         libcurl3-dev \
         libfreetype6-dev \
+        libhdf5-serial-dev \
         libpng12-dev \
         libzmq3-dev \
         openssh-client \
@@ -21,36 +33,44 @@ RUN apt-get update && \
         vim \
         wget \
         unzip zip \
-        zlib1g-dev \
-        libcurl3 libcurl3-dev && \
-    apt-get update && \
-    apt-get upgrade -y && \
+        zlib1g-dev  && \
     apt-get clean && \
     apt-get autoremove && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    find /usr/local/cuda-9.0/lib64/ -type f -name 'lib*_static.a' -not -name 'libcudart_static.a' -delete && \
+    rm /usr/lib/x86_64-linux-gnu/libcudnn_static_v7.a
+
+RUN apt-get update && \
+    apt-get install nvinfer-runtime-trt-repo-ubuntu1604-4.0.1-ga-cuda9.0 && \
+    apt-get update && \
+    apt-get install libnvinfer4=4.1.2-1+cuda9.0 && \
+    apt-get install libnvinfer-dev=4.1.2-1+cuda9.0
+
+# Link NCCL libray and header where the build script expects them.
+RUN mkdir /usr/local/cuda-9.0/lib &&  \
+    ln -s /usr/lib/x86_64-linux-gnu/libnccl.so.2 /usr/local/cuda/lib/libnccl.so.2 && \
+    ln -s /usr/include/nccl.h /usr/local/cuda/include/nccl.h
 
 RUN curl -fSsL -O https://bootstrap.pypa.io/get-pip.py && \
     python get-pip.py && \
     rm get-pip.py
 
-RUN pip --no-cache-dir install \
+RUN pip --no-cache-dir install -U \
         Cython \
-        gensim \
-        gitpython \
-        git+https://github.com/scikit-learn/scikit-learn.git \
+	git+https://github.com/scikit-learn/scikit-learn.git \
+        h5py \
         ipykernel \
-        ipywidgets \
         jupyter \
+        keras_applications \
+        keras_preprocessing \
         matplotlib \
+        mock \
         numpy \
-        nltk \
-        pandas \
-        psutil \
-        Pillow \
-        scipy \
-        spacy \
-        requests \
-        pandas && \
+	pandas \
+	psutil \
+	Pillow \
+	requests \
+        scipy && \
     python -m ipykernel.kernelspec
 
 # Set up Bazel.
@@ -64,7 +84,7 @@ RUN echo "startup --batch" >>/etc/bazel.bazelrc
 RUN echo "build --spawn_strategy=standalone --genrule_strategy=standalone" \
     >>/etc/bazel.bazelrc
 # Install the most recent bazel release.
-ENV BAZEL_VERSION 0.8.0
+ENV BAZEL_VERSION 0.15.0
 WORKDIR /
 RUN mkdir /bazel && \
     cd /bazel && \
@@ -75,19 +95,21 @@ RUN mkdir /bazel && \
     cd / && \
     rm -f /bazel/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh
 
-RUN python -m spacy download en && \
-    python -m nltk.downloader perluniprops nonbreaking_prefixes
-
 WORKDIR /
 RUN git clone --recurse-submodules https://github.com/hfchong/fold.git
 
 ENV CI_BUILD_PYTHON=python
 ENV PYTHON_BIN_PATH=/usr/bin/python
 ENV PYTHON_LIB_PATH=/usr/local/lib/python2.7/dist-packages
+ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:$LD_LIBRARY_PATH
 ENV CC_OPT_FLAGS='-march=native'
+ENV TF_CUDA_VERSION=9.0
+ENV TF_CUDNN_VERSION=7
 ENV TF_NEED_JEMALLOC=0
 ENV TF_NEED_GCP=0
-ENV TF_NEED_CUDA=0
+ENV TF_NEED_CUDA=1
+ENV TF_NEED_TENSORRT 1
+ENV TF_CUDA_COMPUTE_CAPABILITIES=3.5,5.2,6.0,6.1,7.0
 ENV TF_NEED_HDFS=0
 ENV TF_NEED_S3=0
 ENV TF_NEED_OPENCL=0
@@ -96,23 +118,29 @@ ENV TF_ENABLE_XLA=0
 ENV TF_NEED_VERBS=0
 ENV TF_NEED_MPI=0
 
+# NCCL 2.x
+ENV TF_NCCL_VERSION=2
+
 WORKDIR /fold/tensorflow
-RUN tensorflow/tools/ci_build/builds/configured CPU \
-    bazel build -c opt --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0" --copt="-march=native" \
+RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1 && \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH} && \
+    tensorflow/tools/ci_build/builds/configured GPU && \
+    bazel build -c opt --copt="-mavx" --config=cuda --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0" \
         tensorflow/tools/pip_package:build_pip_package
+RUN bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow-pip && \
+    pip --no-cache-dir install --upgrade /tmp/tensorflow-pip/*.whl && \
+    rm -rf /tmp/tensorflow-pip
 
 WORKDIR /fold
-RUN bazel --bazelrc=tensorflow/.tf_configure.bazelrc build -c opt --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0" --copt="-march=native" \
-       tensorflow_fold/util:build_pip_package
-
-RUN bazel-bin/tensorflow_fold/util/build_pip_package /tmp/fold_pkg && \
-    cd tensorflow && \
-    bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow-pip && \
+RUN LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH} && \
+    bazel --bazelrc=tensorflow/.tf_configure.bazelrc \
+        build -c opt --copt="-mavx" --config=cuda --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0" --verbose_failures \
+          tensorflow_fold/util:build_pip_package
+RUN ./bazel-bin/tensorflow_fold/util/build_pip_package /tmp/fold_pkg && \
     pip --no-cache-dir install --upgrade /tmp/fold_pkg/*.whl && \
-    pip --no-cache-dir install --upgrade /tmp/tensorflow-pip/*.whl && \
-    rm -rf /tmp/fold_pkg && \
-    rm -rf /tmp/tensorflow-pip && \
-    rm -rf /root/.cache
+    rm -rf /tmp/fold_pkg/ && \
+    rm -rf /root/.cache/ && \
+    rm /usr/local/cuda/lib64/stubs/libcuda.so.1
 
 COPY jupyter_notebook_config.py /root/.jupyter/
 
@@ -126,6 +154,6 @@ EXPOSE 6006
 # IPython
 EXPOSE 8888
 
-WORKDIR "/workdir"
+WORKDIR /workdir
 
 CMD ["/run_jupyter.sh", "--allow-root"]

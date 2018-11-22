@@ -4,6 +4,7 @@ data/model/
 data/glove/
 data/google_word2vec/
 .ipynb_checkpoints/
+.idea/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
